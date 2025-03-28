@@ -1,4 +1,4 @@
-name = "STARS"
+name = "STARSDataFusion"
 uuid = "70ccc657-289f-4534-a407-e03a16fd1153"
 authors = ["Gregory Halverson", "Margaret Johnson", "Jouni Susiluoto"]
 version = "0.1.0"
