@@ -12,7 +12,7 @@ Gregory H. Halverson (they/them)<br>
 Lead developer for data processing pipeline design and development, moving window implementation, and code organization and management.<br>
 NASA Jet Propulsion Laboratory 329G
 
-Jouni I. Susiluoto (he/him)<br>
+Jouni I. Susiluoto<br>
 [jouni.i.susiluoto@jpl.nasa.gov](mailto:jouni.i.susiluoto@jpl.nasa.gov)<br>
 Technical contributor for methodology development, co- developer of Julia code for Kalman filtering recursion.
 NASA Jet Propulsion Laboratory 398L
