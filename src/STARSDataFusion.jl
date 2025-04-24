@@ -1,4 +1,4 @@
-module STARS
+module STARSDataFusion
 
 export STARS_fusion
 export coarse_fine_data_fusion
