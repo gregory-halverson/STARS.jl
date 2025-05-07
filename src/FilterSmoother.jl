@@ -1,7 +1,7 @@
 module FilterSmoother
 
 
-export KSModel, filter, smoother, filter_series, smooth_series, conditional_sim, conditional_sim_series
+export KSModel #, filter, smoother, filter_series, smooth_series, conditional_sim, conditional_sim_series
 
 
 using LinearAlgebra
@@ -26,7 +26,7 @@ end
     y::observation vector
     M::KSModel{T}
 """
-function filter(M::KSModel{T}, y::AbstractVector{T}, err_vars::AbstractVector{T}, x_pred::Vector{T}, P_pred::AbstractMatrix{T}; nfs::Int = 0) where T <: Real
+function filter(M::KSModel{<: Real}, y::AbstractVector{<: Real}, err_vars::AbstractVector{<: Real}, x_pred::Vector{<: Real}, P_pred::AbstractMatrix{<: Real}; nfs::Int = 0) 
 
     ym = .!isnan.(y)
     sum(ym) == 0 && return (x_pred, P_pred)
@@ -112,7 +112,7 @@ function filter(M::KSModel{T}, y::AbstractVector{T}, err_vars::AbstractVector{T}
 end
 
 
-function filter_series(M::KSModel{T}, x0::AbstractVector{T}, P0::AbstractMatrix{T}, Y::Matrix{T}, Y_err_vars::Matrix{T}) where T <: Real
+function filter_series(M::KSModel{<: Real}, x0::AbstractVector{<: Real}, P0::AbstractMatrix{<: Real}, Y::Matrix{<: Real}, Y_err_vars::Matrix{<: Real}) 
 
     # Shorthands
     F = M.F
