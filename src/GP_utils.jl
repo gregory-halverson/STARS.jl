@@ -31,11 +31,6 @@ function matern_cor_fast(X1::AbstractArray{T}, pars=AbstractVector{T}) where {T<
     kernelmatrix(k,X1, obsdim=2)
 end
 
-function build_GP_var(locs, sigma, phi, nugget=1e-10)
-    A = sigma .* kernel_matrix(locs, reg=nugget, σ=phi)
-    return A
-end
-
 function exp_cor(X::AbstractArray{T}, pars::AbstractVector{T}) where {T<:Real}
     σ = pars[1]
     reg = pars[2]

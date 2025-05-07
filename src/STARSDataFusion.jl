@@ -13,6 +13,19 @@ export DataFusionState
 export STARSInstrumentData
 export STARSInstrumentGeoData
 
+export cell_size
+export get_centroid_origin_raster
+
+export nanmean
+export nanvar
+
+export exp_cor
+export mat32_cor
+export mat52_cor
+export state_cov
+
+export unif_weighted_obs_operator
+export unif_weighted_obs_operator_centroid
 # Write your package code here.
 
 using Suppressor
@@ -44,6 +57,7 @@ using MultivariateStats
 using Random
 using Interpolations
 using KernelFunctions
+using Distributed
 
 include("BBoxes.jl")
 
@@ -110,13 +124,13 @@ function unif_weighted_obs_operator(sensor, target, sensor_res, target_res)
 end
 
 ## need to update for corner coordinates
-function gauss_weighted_obs_operator(sensor, target, res; p=1.0, scale=1.0)
-    H = exp.(-0.5 * pairwise(SqEuclidean(), sensor ./ transpose(res ./ scale), target ./ transpose(res ./ scale), dims=1))
+# function gauss_weighted_obs_operator(sensor, target, res; p=1.0, scale=1.0)
+#     H = exp.(-0.5 * pairwise(SqEuclidean(), sensor ./ transpose(res ./ scale), target ./ transpose(res ./ scale), dims=1))
 
-    H[H.<exp(-0.5 * (p * scale)^2)] .= 0
+#     H[H.<exp(-0.5 * (p * scale)^2)] .= 0
 
-    return sparse(broadcast(/, H, sum(H, dims=2)))
-end
+#     return sparse(broadcast(/, H, sum(H, dims=2)))
+# end
 
 ## neighborhood functions on a grid
 function col_major(row, col, nrow)
@@ -1940,13 +1954,17 @@ function fast_var_est(
         default_var = 1e-4
     )
 
-    if ismissing(coarse_images.missingval)
+    if isnothing(coarse_images.missingval)
+        num_obs = sum(.!(isnan.(coarse_images)),dims=3)
+        result = mapslices(x -> var(x[.!(isnan.(x))]), diff(coarse_images,dims=3), dims=3).*n_eff_agg
+    elseif ismissing(coarse_images.missingval)
         num_obs = sum(.!(ismissing.(coarse_images)),dims=3)
+        result = mapslices(x -> var(x[.!(ismissing.(x))]), diff(coarse_images,dims=3), dims=3).*n_eff_agg
     elseif isnan(coarse_images.missingval)
         num_obs = sum(.!(isnan.(coarse_images)),dims=3)
+        result = mapslices(x -> var(x[.!(isnan.(x))]), diff(coarse_images,dims=3), dims=3).*n_eff_agg
     end
 
-    result = mapslices(x -> var(x[.!(isnan.(x))]), diff(coarse_images,dims=3), dims=3).*n_eff_agg
     result[num_obs .< min_num_obs] .= default_var
 
     return result
@@ -2458,6 +2476,9 @@ function coarse_fine_fusion_dict(d,
             Ht = H[yms,:]
         end;
 
+        ### remove rows of ys, Ht, err_vars that have no BAUs
+        kp = sum(Ht, dims=2)[:] .> 0
+
         # Predictive mean and covariance here
         P_pred .= Qf
         mul!(x_pred, F, @view(filtering_means[:,t]))
@@ -2465,13 +2486,13 @@ function coarse_fine_fusion_dict(d,
         mul!(P_pred, FPpred, F', 1.0, 1.0)
 
         # Filtering is done here
-        if sum(.!isnan.(ys)) == 0
+        if sum(.!isnan.(ys[kp])) == 0
             filtering_means[:,t+1] = x_pred
             filtering_covs[:,:,t+1] = P_pred
             filtering_prec[:,t+1] = 1.0 ./ sqrt.(diag(P_pred))
 
         else
-            kalman_filter!(x_new, P_new, Ht, ys, err_vars, x_pred, P_pred)
+            kalman_filter!(x_new, P_new, Ht[kp,:], ys[kp], err_vars[kp], x_pred, P_pred)
             filtering_means[:,t+1] = x_new
             filtering_covs[:,:,t+1] = P_new
             filtering_prec[:,t+1] = 1.0 ./ sqrt.(diag(P_new))
@@ -2489,7 +2510,7 @@ end
 
 function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
         fine_geodata, coarse_geodata,
-        nwindows::AbstractVector,
+        window_geodata,
         prior_mean::AbstractArray,
         prior_var::AbstractArray,
         model_pars::AbstractArray;
@@ -2501,13 +2522,14 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
         state_in_cov = false,
         cov_wt = 0.2,
         phi = 0.001,
-        nb_coarse=2.0) 
+        nb_coarse=2.0,
+        batchsize=1) 
 
     ### define target extent and target + buffer extent
-    window_csize = coarse_geodata.cell_size
+    window_csize = window_geodata.cell_size
     target_csize = fine_geodata.cell_size
-    window_origin = coarse_geodata.origin
-    window_ndims = coarse_geodata.ndims
+    window_origin = window_geodata.origin
+    nwindows = window_geodata.ndims
     target_origin = fine_geodata.origin
     target_ndims = fine_geodata.ndims
 
@@ -2614,10 +2636,10 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
         push!(T,d)
     end
 
-    result = pmap(x -> coarse_fine_fusion_dict(x,  
+    result = @showprogress pmap(x -> coarse_fine_fusion_dict(x,  
                         target_times, spatial_mod, 
                         obs_operator, state_in_cov, 
-                        cov_wt, phi) , T );
+                        cov_wt, phi) , T , batch_size=batchsize);
 
     for i in 1:n
         @views fused_image[result[i][1],:] = result[i][2]
