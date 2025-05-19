@@ -4,6 +4,7 @@ export STARS_fusion
 export coarse_fine_data_fusion
 export coarse_fine_data_fusion_SS
 export coarse_fine_scene_fusion_pmap
+export coarse_fine_scene_fusion_cbias_pmap
 
 export MLE_estimation
 export fast_var_est
@@ -2140,7 +2141,7 @@ function coarse_fine_fusion_cbias!(fused_image,
         if !any(data_kp[:,t])
             ys = fill(NaN,1)
             err_vars = fill(NaN,1)
-            M = KSModel(nothing, Qf, F)
+            # M = KSModel(nothing, Qf, F)
         else
             ys = Float64[]
             err_vars = Float64[]
@@ -2358,7 +2359,8 @@ function coarse_fine_fusion_dict(d,
         obs_operator::Function = unif_weighted_obs_operator_centroid,
         state_in_cov::Bool = false,
         cov_wt::AbstractFloat = 0.3,
-        phi::AbstractFloat = 0.001)
+        phi::AbstractFloat = 0.001,
+        ar_par::AbstractFloat = 1.0)
 
     measurements = @views d[:measurements]
     target_coords = @views d[:target_coords]
@@ -2408,7 +2410,7 @@ function coarse_fine_fusion_dict(d,
     cvs = Diagonal(model_pars[:,1]) ## sqrt of variances
     Q = cvs * spatial_mod(target_coords', model_pars[1,2:end]) * cvs
 
-    F = UniformScaling(1.0)
+    F = UniformScaling(ar_par)
 
     filtering_means = zeros(n,nsteps+1)
     filtering_covs = zeros(n,n,nsteps+1)
@@ -2455,7 +2457,7 @@ function coarse_fine_fusion_dict(d,
         if !any(data_kp[:,t])
             ys = fill(NaN,1)
             err_vars = fill(NaN,1)
-            M = KSModel(nothing, Qf, F)
+            # M = KSModel(nothing, Qf, F)
         else
             ys = Float64[]
             err_vars = Float64[]
@@ -2522,6 +2524,7 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
         state_in_cov = false,
         cov_wt = 0.2,
         phi = 0.001,
+        ar_par = 1.0,
         nb_coarse=2.0,
         batchsize=1) 
 
@@ -2639,7 +2642,7 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
     result = @showprogress pmap(x -> coarse_fine_fusion_dict(x,  
                         target_times, spatial_mod, 
                         obs_operator, state_in_cov, 
-                        cov_wt, phi) , T , batch_size=batchsize);
+                        cov_wt, phi, ar_par) , T , batch_size=batchsize);
 
     for i in 1:n
         @views fused_image[result[i][1],:] = result[i][2]
@@ -2647,6 +2650,355 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
     end
 
     return fused_image, fused_sd_image
+end
+
+## distributed, coarse AR bias
+
+function coarse_fine_fusion_cbias_dict(d, ## at fine resolution
+        target_times = [1],
+        spatial_mod::Function = mat32_cor,                                         
+        obs_operator::Function = unif_weighted_obs_operator,
+        state_in_cov::Bool = false,
+        cov_wt::AbstractFloat = 0.3, 
+        phi::AbstractFloat = 0.001,
+        ar_par::AbstractFloat = 1.0)
+   
+    measurements = @views d[:measurements]
+    target_coords = @views d[:target_coords]
+    kp_ij = @views d[:kp_ij]
+    kp_bias_ij = @views d[:kp_bias_ij]
+    prior_mean = @views d[:prior_mean]
+    prior_var = @views d[:prior_var]
+    prior_bias_mean = @views d[:prior_bias_mean]
+    prior_bias_var = @views d[:prior_bias_var]
+    model_pars = @views d[:model_pars]
+
+    ni = size(measurements)[1] 
+    nf = size(target_coords)[1]
+    nnobs = Vector{Int64}(undef, ni)
+    t0v = Vector{Int64}(undef, ni)
+    ttv = Vector{Int64}(undef, ni)
+    for i in 1:ni
+        nnobs[i] = size(measurements[i].data)[1]
+        t0v[i] = measurements[i].dates[1]
+        ttv[i] = measurements[i].dates[end] 
+    end
+
+    t0 = minimum(t0v)
+    tt = maximum(ttv)
+    tp = maximum(target_times);
+
+    times = t0:tp
+
+    nsteps = size(times)[1]
+
+    biases = [x.dynamic_bias for x in measurements]
+    nn_biases = nnobs[:]
+    nn_biases[.!biases] .= 0
+    nt_bias = sum(nn_biases)
+
+    data_kp = falses(ni,nsteps)
+
+    ## build observation operator, stack observations and variances 
+    Hl = Vector(undef,ni)
+    Qb = Float64[]
+    Fb = Float64[]
+
+    for (i,x) in enumerate(measurements)
+        Hs = obs_operator(x.coords, target_coords, x.spatial_resolution) # kwargs for uniform needs :target_resolution, # kwargs for gaussian needs :scale, :p
+        if x.dynamic_bias 
+            Hbb = [spzeros(x,x) for x in nn_biases]
+            Hbb[i] .= 1.0*I(nnobs[i])
+            Hl[i] = hcat(Hs,Hbb[length.(Hbb) .> 0]...)
+            append!(Fb,x.dynamic_bias_coefs[1]*ones(nnobs[i]))
+            append!(Qb,x.dynamic_bias_coefs[2]*ones(nnobs[i]))
+        else
+            Hl[i] = hcat(Hs,spzeros(nnobs[i],nt_bias))
+        end
+        data_kp[i,in(measurements[i].dates).(t0:tp)] .= 1
+    end
+    H = vcat(Hl...);
+
+    nb = sum(length.(Qb))
+    n = nf+nb
+    Q = zeros(n,n)
+    cvs = Diagonal(model_pars[:,1]) ## sqrt of variances
+    Q[1:nf,1:nf] = cvs * spatial_mod(target_coords', model_pars[1,2:end]) * cvs
+
+    if length(Fb) .> 0
+        F = Diagonal([ar_par .* ones(nf)...,Fb...])
+        @views Q[diagind(Q)[(nf+1):end]] = [Qb...]
+    else
+        F = UniformScaling(ar_par)
+    end
+
+    nb = length(prior_bias_mean)
+    n = nf+nb
+
+    filtering_means = zeros(n,nsteps+1)
+    filtering_covs = zeros(n,n,nsteps+1)
+    filtering_prec = zeros(nf,nsteps+1) ## 1 / sqrt(filter_var) used to weight states in state-in-cov model
+
+    filtering_means[1:nf,1] = prior_mean
+    filtering_means[(nf+1):end,1] = prior_bias_mean
+    filtering_prec[1:nf,1] = 1 ./ sqrt.(prior_var[1:nf]) 
+    @views filtering_covs[diagind(filtering_covs[:,:,1])[1:nf]] = prior_var
+    @views filtering_covs[diagind(filtering_covs[:,:,1])[(nf+1):end]] = prior_bias_var
+
+    x_pred = zeros(n)
+    P_pred = zeros(n,n)
+    x_new = zeros(n)
+    P_new = zeros(n,n)
+    Qss = zeros(nf,nf)
+    FPpred = similar(P_pred)
+
+    Qf = zeros(n,n)
+   
+    nbau = size(kp_ij,1)
+    nbias = size(kp_bias_ij,1)
+
+    fused_image = zeros(nbau,size(target_times,1))
+    fused_sd_image = zeros(nbau,size(target_times,1))
+    fused_bias_image = zeros(nbias,size(target_times,1))
+    fused_bias_sd_image = zeros(nbias,size(target_times,1))
+
+    tk = 1
+    for (t,t2) in enumerate(t0:tp)
+        Qf .= Q
+        if state_in_cov 
+            
+            Xtt = @views filtering_means[1:nf,1:t]
+            Wt = @views filtering_prec[:,1:t] .* sqrt(measurements[1].uq) ### scale by ratio of sigma_e / sigma_filter
+            pairwise!(Qss,Euclidean(1e-12), Xtt .* Wt, dims=1) 
+            # phi = maximum([0.01,mean(Qss)])
+
+            Qss ./= phi
+            # Qss .= exp.(-Qss) + UniformScaling(1e-8)
+            # replace!(x->(x==1.0 ? 1.0+1e-8 : x), Qss) 
+            Qss .= cvs * exp.(-Qss) * cvs + UniformScaling(1e-10)
+
+            Qss .*= (1.0 .- cov_wt) 
+        
+            @view(Qf[1:nf,1:nf]) .*= cov_wt 
+            @view(Qf[1:nf,1:nf]) .+= Qss
+        end
+
+        if !any(data_kp[:,t])
+            ys = fill(NaN,1)
+            err_vars = fill(NaN,1)
+            kp = BitVector([1])
+            # M = KSModel(nothing, Qf, F)
+        else
+            ys = Float64[]
+            err_vars = Float64[]
+            yms = Int64[]
+            nii = 0
+            for x in 1:2
+                yss = @views measurements[x].data[:,measurements[x].dates .== t2][:]
+                ym = findall(.!isnan.(yss))
+                if length(ym) > 0
+                    err_varss = @views measurements[x].uq*ones(length(ym))
+                    @views append!(ys,yss[ym]);
+                    append!(err_vars,err_varss);
+                    append!(yms,ym .+ nii);
+                end
+                nii += nnobs[x]
+            end
+            # M = KSModel(H[yms,:], Q, F)
+            
+            Ht = H[yms,:]
+            if length(yms) .== 1
+                Ht = reshape(Ht, 1, n)
+            end
+            kp = sum(Ht[:,1:nf], dims=2)[:] .> 0
+        end;
+
+        # Predictive mean and covariance here
+        P_pred .= Qf
+        mul!(x_pred, F, @view(filtering_means[:,t]))
+        mul!(FPpred, F, @view(filtering_covs[:,:,t]))
+        mul!(P_pred, FPpred, F', 1.0, 1.0)
+
+        # Filtering is done here
+        if sum(.!isnan.(ys[kp])) == 0
+            filtering_means[:,t+1] = x_pred
+            filtering_covs[:,:,t+1] = P_pred
+            filtering_prec[:,t+1] = 1.0 ./ sqrt.(diag(P_pred)[1:nf])
+        else
+            kalman_filter!(x_new, P_new, Ht[kp,:], ys[kp], err_vars[kp], x_pred, P_pred)
+            filtering_means[:,t+1] = x_new
+            filtering_covs[:,:,t+1] = P_new
+            filtering_prec[:,t+1] = 1.0 ./ sqrt.(diag(P_new)[1:nf])
+        end    
+
+        if t2 .∈ Ref(target_times)
+            fused_image[:,tk] = @views filtering_means[1:nbau,t+1];
+            fused_sd_image[:,tk] = @views 1.0 ./ filtering_prec[1:nbau,t+1]
+                    
+            fused_bias_image[:,tk] .= @views filtering_means[nf+1,t+1]
+            fused_bias_sd_image[:,tk] .= @views filtering_covs[nf+1,nf+1,t+1]
+            tk += 1
+        end
+    end 
+    return kp_ij, kp_bias_ij, fused_image, fused_sd_image, fused_bias_image, fused_bias_sd_image   
+end
+
+function coarse_fine_scene_fusion_cbias_pmap(fine_data, coarse_data,
+        fine_geodata, coarse_geodata,
+        prior_mean::AbstractArray,
+        prior_var::AbstractArray,
+        prior_bias_mean::AbstractArray,
+        prior_bias_var::AbstractArray,
+        model_pars::AbstractArray;
+        nsamp = 100,
+        window_buffer = 2,
+        target_times = [1], 
+        spatial_mod::Function = matern_cor,                                           
+        obs_operator::Function = unif_weighted_obs_operator,
+        state_in_cov::Bool = false,
+        cov_wt::AbstractFloat = 0.2,
+        phi::AbstractFloat = 0.001,
+        ar_par::AbstractFloat = 1.0,
+        nb_coarse=2.0,
+        batchsize=1) 
+
+    ### define target extent and target + buffer extent
+    window_csize = coarse_geodata.cell_size
+    target_csize = fine_geodata.cell_size
+    window_origin = coarse_geodata.origin
+    window_ndims = coarse_geodata.ndims
+    target_origin = fine_geodata.origin
+    target_ndims = fine_geodata.ndims
+    nwindows = coarse_geodata.ndims
+
+    K = 2
+    tkp = size(target_times,1)
+    fused_image = zeros(target_ndims[1], target_ndims[2], tkp);
+    fused_sd_image = zeros(target_ndims[1], target_ndims[2], tkp);
+
+    fused_bias_image = zeros(window_ndims[1], window_ndims[2], tkp);
+    fused_bias_sd_image = zeros(window_ndims[1], window_ndims[2], tkp);
+
+    inds = hcat(repeat(1:nwindows[1], inner=nwindows[2]), repeat(1:nwindows[2], outer=nwindows[1]))
+
+    inst_geodata = [fine_geodata, coarse_geodata]
+
+    n = size(inds,1)
+    T =[]
+
+    for ii in 1:n
+        k,l = inds[ii,:]
+        ### find target partition given origin and (k,l)th partition coordinate
+        bbox_centroid = window_origin .+ [k-1, l-1].*window_csize
+        window_bbox = bbox_from_centroid(bbox_centroid, window_csize)
+
+        ### add buffer of window_buffer target pixels around target partition extent
+        buffer_ext = window_bbox .+ window_buffer*[-1.01,1.01]*target_csize'
+
+        ### find extent of overlapping instruments for each instrument
+        all_exts = Vector{AbstractMatrix{Float64}}(undef,K)
+        for (i,x) in enumerate(inst_geodata)
+            all_exts[i] = Matrix(find_overlapping_ext(buffer_ext[1,:], buffer_ext[2,:], x.origin, x.cell_size))
+        end
+
+        ## extend window to number of coarse neighbors
+        exx = window_bbox .+ [-nb_coarse - 0.01,nb_coarse + 0.01]*inst_geodata[2].cell_size'
+        push!(all_exts, exx)
+
+        ### finf full extent combining all instrument extents
+        full_ext = merge_extents(all_exts, sign.(target_csize))
+
+        ### Find all BAUs within target
+        target_ij = find_all_ij_ext(window_bbox[1,:], window_bbox[2,:], target_origin, target_csize, target_ndims; inclusive=false)
+        # t_xy = get_sij_from_ij(target_ij, target_origin, target_csize)
+
+        ### Find all BAUs within target + buffer
+        ss_target = find_all_ij_ext(buffer_ext[1,:], buffer_ext[2,:], target_origin, target_csize, target_ndims)
+        # tb_xy = get_sij_from_ij(target_buffer_ij, target_origin, target_csize)
+
+        ### subsample BAUs within full extent of coarse pixels
+        ss_samp = sobol_bau_ij(full_ext[1,:], full_ext[2,:], target_origin, target_csize, target_ndims; nsamp=nsamp)
+        bau_ij = unique(vcat(target_ij, ss_target, ss_samp),dims=1)
+        bau_ci = CartesianIndex.(bau_ij[:,1],bau_ij[:,2])
+
+        bau_xy = get_sij_from_ij(bau_ij, target_origin, target_csize)
+
+        ### Find measurements:
+        measurements = Vector{STARSInstrumentData}(undef, K)
+
+        # fine_ij = unique(find_nearest_ij_multi(ss_xy, fine_geodata.origin, fine_geodata.cell_size,fine_geodata.ndims),dims=1)
+        # fine_xy = get_sij_from_ij(fine_ij, fine_geodata.origin, fine_geodata.cell_size)
+        # ys = fine_data.data[bau_ci,:]
+        measurements[1] = @views STARSInstrumentData(fine_data.data[bau_ci,:],
+                                fine_data.bias, 
+                                fine_data.uq, 
+                                fine_data.dynamic_bias,
+                                fine_data.dynamic_bias_coefs,
+                                abs.(fine_geodata.cell_size),
+                                fine_geodata.dates,
+                                bau_xy)
+
+        coarse_ij = find_all_ij_ext(full_ext[1,:], full_ext[2,:], coarse_geodata.origin, coarse_geodata.cell_size, coarse_geodata.ndims; inclusive=false)
+        coarse_xy = get_sij_from_ij(coarse_ij, coarse_geodata.origin, coarse_geodata.cell_size)
+
+        kp_bias = findall(sum(abs.(coarse_xy .- bbox_centroid'),dims=2)[:] .== 0)[1]
+        pp = [kp_bias, 1:(kp_bias-1)..., (kp_bias+1):size(coarse_ij,1)...]
+
+        coarse_ci = CartesianIndex.(coarse_ij[pp,1],coarse_ij[pp,2])
+        # ys = coarse_data.data[coarse_ci,:]
+        measurements[2] = @views STARSInstrumentData(coarse_data.data[coarse_ci,:],
+                            coarse_data.bias, 
+                            coarse_data.uq, 
+                            coarse_data.dynamic_bias,
+                            coarse_data.dynamic_bias_coefs,
+                            abs.(coarse_geodata.cell_size),
+                            coarse_geodata.dates,
+                            coarse_xy[pp,:])
+
+        ### x,y coords for all baus
+        bau_coords = get_sij_from_ij(bau_ij, target_origin, target_csize)
+
+        ### subset prior mean and var arrays to bau pixels
+        prior_mean_sub = @views prior_mean[bau_ci][:]
+        prior_var_sub = @views prior_var[bau_ci][:]
+
+        prior_bias_mean_sub = @views prior_bias_mean[coarse_ci][:]
+        prior_bias_var_sub = @views prior_bias_var[coarse_ci][:]
+
+        #### order bias?
+        t_ind = CartesianIndex.(target_ij[:,1], target_ij[:,2])
+        b_ind = CartesianIndex.(coarse_ij[kp_bias:kp_bias,1],coarse_ij[kp_bias:kp_bias,2])
+
+        model_pars_sub = model_pars[bau_ci,:]
+
+        d = Dict()
+        d[:measurements] = measurements
+        d[:target_coords] = bau_coords
+        d[:kp_ij] = t_ind
+        d[:kp_bias_ij] = b_ind
+        d[:prior_mean] = prior_mean_sub
+        d[:prior_var] = prior_var_sub
+        d[:prior_bias_mean] = prior_bias_mean_sub
+        d[:prior_bias_var] = prior_bias_var_sub
+        d[:model_pars] = model_pars_sub
+
+        push!(T,d)
+    end
+
+    result = @showprogress pmap(x -> coarse_fine_fusion_cbias_dict(x,  
+                        target_times, spatial_mod, 
+                        obs_operator, state_in_cov, 
+                        cov_wt, phi, ar_par) , T , batch_size=batchsize);
+
+    for i in 1:n
+        @views fused_image[result[i][1],:] = result[i][3]
+        @views fused_sd_image[result[i][1],:] = result[i][4]
+
+        @views fused_bias_image[result[i][2],:] = result[i][5]
+        @views fused_bias_sd_image[result[i][2],:] = result[i][6]
+    end
+
+    return fused_image, fused_sd_image, fused_bias_image, fused_bias_sd_image
 end
 
 end
