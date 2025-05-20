@@ -2723,7 +2723,9 @@ function coarse_fine_fusion_cbias_dict(d, ## at fine resolution
     n = nf+nb
     Q = zeros(n,n)
     cvs = Diagonal(model_pars[:,1]) ## sqrt of variances
-    Q[1:nf,1:nf] = cvs * spatial_mod(target_coords', model_pars[1,2:end]) * cvs
+
+    Qs = spatial_mod(target_coords', model_pars[1,2:end])
+    @views Q[1:nf,1:nf] = cvs * Qs * cvs
 
     if length(Fb) .> 0
         F = Diagonal([ar_par .* ones(nf)...,Fb...])
@@ -2739,10 +2741,13 @@ function coarse_fine_fusion_cbias_dict(d, ## at fine resolution
     filtering_covs = zeros(n,n,nsteps+1)
     filtering_prec = zeros(nf,nsteps+1) ## 1 / sqrt(filter_var) used to weight states in state-in-cov model
 
-    filtering_means[1:nf,1] = prior_mean
-    filtering_means[(nf+1):end,1] = prior_bias_mean
-    filtering_prec[1:nf,1] = 1 ./ sqrt.(prior_var[1:nf]) 
+    @views filtering_means[1:nf,1] = prior_mean
+    @views filtering_means[(nf+1):end,1] = prior_bias_mean
+    @views filtering_prec[1:nf,1] = 1 ./ sqrt.(prior_var[1:nf]) 
+
     @views filtering_covs[diagind(filtering_covs[:,:,1])[1:nf]] = prior_var
+    # cvs_prior = Diagonal(sqrt.(prior_var))
+    # @views filtering_covs[1:nf,1:nf,1] = cvs_prior * Qs * cvs_prior ## induce spatial dependence in prior?
     @views filtering_covs[diagind(filtering_covs[:,:,1])[(nf+1):end]] = prior_bias_var
 
     x_pred = zeros(n)
