@@ -1,7 +1,7 @@
 name = "STARSDataFusion"
 uuid = "70ccc657-289f-4534-a407-e03a16fd1153"
 authors = ["Gregory Halverson", "Margaret Johnson", "Jouni Susiluoto"]
-version = "1.0.0"
+version = "1.0.1"
 
 [deps]
 ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
