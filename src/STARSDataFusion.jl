@@ -1992,8 +1992,8 @@ function kalman_filter!(x_new::AbstractVector{T}, P_new::AbstractMatrix{T},
         x_pred::AbstractVector{T}, 
         P_pred::AbstractMatrix{T}) where T <: Real 
 
-    mul!(y, Ht, x_pred, -1.0, 1.0)
-    
+    # mul!(y, Ht, x_pred, -1.0, 1.0)
+    res_pred = y - Ht * x_pred
     HPpT = P_pred * Ht'
 
     S = Ht * HPpT .+ Diagonal(err_vars) # innovation covariance
@@ -2007,7 +2007,7 @@ function kalman_filter!(x_new::AbstractVector{T}, P_new::AbstractMatrix{T},
 
     # With K
     x_new .= x_pred 
-    mul!(x_new, K, y, 1.0, 1.0) # filtering distribution mean
+    mul!(x_new, K, res_pred, 1.0, 1.0) # filtering distribution mean
 
     HP_pred = Ht * P_pred
     P_new .= P_pred
