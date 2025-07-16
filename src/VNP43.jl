@@ -18,9 +18,7 @@ include("VIIRS.jl")
 
 using .VIIRS: download_VIIRS_tile
 
-include("MODLAND.jl")
-
-using .MODLAND: MODLAND_tiles_in_polygon
+using Modland: modland_tiles_in_polygon
 
 export download_VIIRS_tile
 
@@ -447,7 +445,7 @@ function generate_VNP43_I_tile_UTM(
     cell_size::Union{Float64, Int64} = CELL_SIZE)::Tuple{Raster,Raster}
     date = Date(date)
     @info "generating VNP43 I-band UTM tile $(tile) variable $(variable) date $(date)"
-    sinusoidal_tiles = MODLAND_tiles_in_polygon(sentinel_tile_polygon_latlon(tile))
+    sinusoidal_tiles = modland_tiles_in_polygon(sentinel_tile_polygon_latlon(tile))
 
     composite_image = nothing
     composite_error = nothing
@@ -494,7 +492,7 @@ function generate_VNP43_M_tile_UTM(
     cell_size::Union{Float64, Int64} = CELL_SIZE)::Tuple{Raster,Raster}
     date = Date(date)
     @info "generating VNP43 M-band UTM tile $(tile) variable $(variable) date $(date)"
-    sinusoidal_tiles = MODLAND_tiles_in_polygon(sentinel_tile_polygon_latlon(tile))
+    sinusoidal_tiles = modland_tiles_in_polygon(sentinel_tile_polygon_latlon(tile))
 
     composite_image = nothing
 
