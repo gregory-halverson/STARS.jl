@@ -4,6 +4,7 @@ export STARS_fusion
 export coarse_fine_data_fusion
 export coarse_fine_data_fusion_SS
 export coarse_fine_scene_fusion_pmap
+export coarse_fine_scene_fusion_inds_pmap
 export coarse_fine_scene_fusion_cbias_pmap
 
 export MLE_estimation
@@ -2015,6 +2016,48 @@ function kalman_filter!(x_new::AbstractVector{T}, P_new::AbstractMatrix{T},
     # return x_new, P_new
 end
 
+
+function smooth_series(F, predicted_means, predicted_covs, filtering_means, filtering_covs) 
+
+    # These arrays start at the final smoothed (= filtered) state
+    smoothed_means = zeros(size(predicted_means))
+    smoothed_covs = zeros(size(predicted_covs))
+
+    smoothed_means[:,end] = filtering_means[:,end]
+    smoothed_covs[:,:,end] = filtering_covs[:,:,end]
+
+    # First step that we are interested here in is i = nsteps - 1
+    nsteps = size(predicted_means,2) # This was T previously
+    t0 = 1 #FIXME ADDED BLINDLY
+
+    for i ∈ nsteps:-1:(t0+1)
+        # NB. filtering_covs[i] is P_{i-1|i-1}, predicted_covs[i] is P_{i|i-1}
+        begin # C = filtering_covs[i] * F * inv(predicted_covs[i])
+            CC = predicted_covs[:,:,i][:,:]
+            LAPACK.potrf!('U', CC)
+            LAPACK.potri!('U', CC)
+            C = zeros(size(predicted_covs[:,:,i]))
+            BLAS.symm!('R', 'U', 1., CC, filtering_covs[:,:,i]*F', 0., C)
+        end
+        x_smooth = filtering_means[:,i] .+ C * (smoothed_means[:,nsteps - i + 1] .- predicted_means[:,i])
+
+        # P_smooth = filtering_covs[i] + C * (smoothed_covs[nsteps - i + 1] - predicted_covs[i]) * C'
+        # Compute P_smooth = filtering_covs[i] + C *
+        # (smoothed_covs[nsteps - i + 1] - predicted_covs[i]) * C'
+        begin
+            CC .= smoothed_covs[:,:,nsteps - i + 1] .- predicted_covs[:,:,i]
+            D = BLAS.symm('R', 'U', CC, C) # D = C * CC
+            CC .= filtering_covs[:,:,i]
+            P_smooth = BLAS.gemm!('N', 'T', 1., D, C, 1., CC)
+        end
+
+        smoothed_means[:,i-1] = x_smooth
+        smoothed_covs[:,:,i-1] = P_smooth
+    end
+
+    return smoothed_means, smoothed_covs
+end
+
 ##### new workflow
 
 function coarse_fine_fusion_cbias!(fused_image, 
@@ -2114,10 +2157,8 @@ function coarse_fine_fusion_cbias!(fused_image,
     Qss = zeros(nf,nf)
     FPpred = similar(P_pred)
 
-
     Qf = zeros(n,n)
    
-
     tk = 1
     for (t,t2) in enumerate(t0:tp)
         Qf .= Q
@@ -2360,7 +2401,8 @@ function coarse_fine_fusion_dict(d,
         state_in_cov::Bool = false,
         cov_wt::AbstractFloat = 0.3,
         phi::AbstractFloat = 0.001,
-        ar_par::AbstractFloat = 1.0)
+        ar_par::AbstractFloat = 1.0,
+        smooth = false)
 
     measurements = @views d[:measurements]
     target_coords = @views d[:target_coords]
@@ -2385,8 +2427,13 @@ function coarse_fine_fusion_dict(d,
     t0 = minimum(t0v)
     tt = maximum(ttv)
     tp = maximum(target_times);
+    tpl = minimum(target_times)
 
-    times = t0:tp
+    if smooth
+        times = minimum([t0,tpl]):maximum([tt,tp])
+    else
+        times = minimum([t0,tpl]):tp
+    end
 
     nsteps = size(times)[1]
 
@@ -2401,7 +2448,7 @@ function coarse_fine_fusion_dict(d,
 
     for (i,x) in enumerate(measurements)
         Hl[i] = obs_operator(x.coords, target_coords, x.spatial_resolution) # kwargs for uniform needs :target_resolution, # kwargs for gaussian needs :scale, :p
-        data_kp[i,in(measurements[i].dates).(t0:tp)] .= 1
+        data_kp[i,in(measurements[i].dates).(times)] .= 1
     end
     H = vcat(Hl...);
 
@@ -2415,10 +2462,13 @@ function coarse_fine_fusion_dict(d,
     filtering_means = zeros(n,nsteps+1)
     filtering_covs = zeros(n,n,nsteps+1)
     filtering_prec = zeros(n,nsteps+1)
-    
-    pv = Diagonal(sqrt.(prior_var))
+    predicted_means = zeros(n,nsteps)
+    predicted_covs = zeros(n,n,nsteps)
+
+    # pv = Diagonal(sqrt.(prior_var))
     filtering_means[:,1] = prior_mean
-    filtering_covs[:,:,1] = pv * spatial_mod(target_coords', model_pars[1,2:end]) * pv ### spatial prior
+    # filtering_covs[:,:,1] = pv * spatial_mod(target_coords', model_pars[1,2:end]) * pv ### spatial prior
+    filtering_covs[:,:,1] = Diagonal(prior_var)
     filtering_prec[:,1] = 1.0 ./ sqrt.(prior_var)
     
     x_pred = zeros(n)
@@ -2433,13 +2483,15 @@ function coarse_fine_fusion_dict(d,
     fused_image = zeros(nbau,size(target_times,1))
     fused_sd_image = zeros(nbau,size(target_times,1))
 
+    kp_times = findall(times .∈ Ref(target_times))
+
     tk = 1
-    for (t,t2) in enumerate(t0:tp)
+    for (t,t2) in enumerate(times)
         Qf .= Q
-        if state_in_cov 
+        if state_in_cov && t > 1
             
-            Xtt = @views filtering_means[:,1:t]
-            Wt = @views filtering_prec[:,1:t] .* sqrt(measurements[1].uq) ### scale by precision
+            Xtt = @views filtering_means[:,2:t]
+            Wt = @views filtering_prec[:,2:t] ./ sum(filtering_prec[:,2:t],dims=2) ### scale by precision
             pairwise!(Qss,Euclidean(1e-12), Xtt .* Wt, dims=1) 
             # phi = maximum([0.0001,median(Qss)/5])
             # println(phi)
@@ -2487,6 +2539,9 @@ function coarse_fine_fusion_dict(d,
         mul!(FPpred, F, @view(filtering_covs[:,:,t]))
         mul!(P_pred, FPpred, F', 1.0, 1.0)
 
+        predicted_means[:,t] = x_pred
+        predicted_covs[:,:,t] = P_pred
+
         # Filtering is done here
         if sum(.!isnan.(ys[kp])) == 0
             filtering_means[:,t+1] = x_pred
@@ -2501,12 +2556,26 @@ function coarse_fine_fusion_dict(d,
 
         end    
 
-        if t2 .∈ Ref(target_times)
-            fused_image[:,tk] = @views filtering_means[1:nbau,t+1];
-            fused_sd_image[:,tk] = @views 1.0 ./ filtering_prec[1:nbau,t+1]
-            tk += 1
+        # if t2 .∈ Ref(target_times)
+        #     fused_image[:,tk] = @views filtering_means[1:nbau,t+1];
+        #     fused_sd_image[:,tk] = @views 1.0 ./ filtering_prec[1:nbau,t+1]
+        #     tk += 1
+        # end
+    end  
+    if smooth
+        st = minimum(kp_times)
+        smoothed_means, smoothed_covs = smooth_series(F, predicted_means[:,st:end], predicted_covs[:,:,st:end], filtering_means[:,st:end], filtering_covs[:,:,st:end])
+        for (ti,t2) in enumerate(kp_times .- st .+ 1)
+            fused_image[:,ti] = @views smoothed_means[1:nbau,t2]
+            fused_sd_image[:,ti] = @views sqrt.(diag(smoothed_covs[1:nbau,1:nbau,t2]))
         end
-    end   
+    else
+        for (ti,t2) in enumerate(kp_times)
+            fused_image[:,ti] = @views filtering_means[1:nbau,t2+1]
+            fused_sd_image[:,ti] = @views sqrt.(diag(filtering_covs[1:nbau,1:nbau,t2+1]))
+        end
+    end  
+
     return kp_ij, fused_image, fused_sd_image 
 end
 
@@ -2521,6 +2590,7 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
         target_times = [1], 
         spatial_mod::Function = mat32_cor,                                           
         obs_operator::Function = unif_weighted_obs_operator_centroid,
+        smooth = false,
         state_in_cov = false,
         cov_wt = 0.2,
         phi = 0.001,
@@ -2642,7 +2712,152 @@ function coarse_fine_scene_fusion_pmap(fine_data, coarse_data,
     result = @showprogress pmap(x -> coarse_fine_fusion_dict(x,  
                         target_times, spatial_mod, 
                         obs_operator, state_in_cov, 
-                        cov_wt, phi, ar_par) , T , batch_size=batchsize);
+                        cov_wt, phi, ar_par, smooth) , T , batch_size=batchsize);
+
+    for i in 1:n
+        @views fused_image[result[i][1],:] = result[i][2]
+        @views fused_sd_image[result[i][1],:] = result[i][3]
+    end
+
+    return fused_image, fused_sd_image
+end
+
+
+function coarse_fine_scene_fusion_inds_pmap(fine_data, coarse_data,
+        fine_geodata, coarse_geodata,
+        window_geodata,
+        prior_mean::AbstractArray,
+        prior_var::AbstractArray,
+        model_pars::AbstractArray,
+        inds;
+        nsamp = 100,
+        window_buffer = 2,
+        target_times = [1], 
+        spatial_mod::Function = mat32_cor,                                           
+        obs_operator::Function = unif_weighted_obs_operator_centroid,
+        smooth = false,
+        state_in_cov = false,
+        cov_wt = 0.2,
+        phi = 0.001,
+        ar_par = 1.0,
+        nb_coarse=2.0,
+        batchsize=1) 
+
+    ### define target extent and target + buffer extent
+    window_csize = window_geodata.cell_size
+    target_csize = fine_geodata.cell_size
+    window_origin = window_geodata.origin
+    nwindows = window_geodata.ndims
+    target_origin = fine_geodata.origin
+    target_ndims = fine_geodata.ndims
+
+    K = 2
+    tkp = size(target_times,1)
+    fused_image = zeros(target_ndims[1], target_ndims[2], tkp);
+    fused_sd_image = zeros(target_ndims[1], target_ndims[2], tkp);
+
+    # inds = hcat(repeat(1:nwindows[1], inner=nwindows[2]), repeat(1:nwindows[2], outer=nwindows[1]))
+
+    inst_geodata = [fine_geodata, coarse_geodata]
+
+    n = size(inds,1)
+
+    T =[]
+
+    for ii in 1:n
+
+        k,l = inds[ii,:]
+        ### find target partition given origin and (k,l)th partition coordinate
+        bbox_centroid = window_origin .+ [k-1, l-1].*window_csize
+        window_bbox = bbox_from_centroid(bbox_centroid, window_csize)
+
+        ### add buffer of window_buffer target pixels around target partition extent
+        buffer_ext = window_bbox .+ window_buffer*[-1.01,1.01]*target_csize'
+
+        ### find extent of overlapping instruments for each instrument
+        all_exts = Vector{AbstractMatrix{Float64}}(undef,K)
+        for (i,x) in enumerate(inst_geodata)
+            all_exts[i] = Matrix(find_overlapping_ext(buffer_ext[1,:], buffer_ext[2,:], x.origin, x.cell_size))
+        end
+
+        ## extend window to number of coarse neighbors
+        exx = window_bbox .+ [-nb_coarse - 0.01,nb_coarse + 0.01]*inst_geodata[2].cell_size'
+        push!(all_exts, exx)
+
+        ### finf full extent combining all instrument extents
+        full_ext = merge_extents(all_exts, sign.(target_csize))
+
+        ### Find all BAUs within target
+        target_ij = find_all_ij_ext(window_bbox[1,:], window_bbox[2,:], target_origin, target_csize, target_ndims; inclusive=false)
+        # t_xy = get_sij_from_ij(target_ij, target_origin, target_csize)
+
+        ### Find all BAUs within target + buffer
+        ss_target = find_all_ij_ext(buffer_ext[1,:], buffer_ext[2,:], target_origin, target_csize, target_ndims)
+        # tb_xy = get_sij_from_ij(target_buffer_ij, target_origin, target_csize)
+
+        ### subsample BAUs within full extent of coarse pixels
+        ss_samp = sobol_bau_ij(full_ext[1,:], full_ext[2,:], target_origin, target_csize, target_ndims; nsamp=nsamp)
+        bau_ij = unique(vcat(target_ij, ss_target, ss_samp),dims=1)
+        bau_ci = CartesianIndex.(bau_ij[:,1],bau_ij[:,2])
+
+        bau_xy = get_sij_from_ij(bau_ij, target_origin, target_csize)
+
+        ### Find measurements:
+        measurements = Vector{STARSInstrumentData}(undef, K)
+
+        # fine_ij = unique(find_nearest_ij_multi(ss_xy, fine_geodata.origin, fine_geodata.cell_size,fine_geodata.ndims),dims=1)
+        # fine_xy = get_sij_from_ij(fine_ij, fine_geodata.origin, fine_geodata.cell_size)
+        # ys = fine_data.data[bau_ci,:]
+        measurements[1] = @views STARSInstrumentData(fine_data.data[bau_ci,:],
+                                fine_data.bias, 
+                                fine_data.uq, 
+                                fine_data.dynamic_bias,
+                                fine_data.dynamic_bias_coefs,
+                                abs.(fine_geodata.cell_size),
+                                fine_geodata.dates,
+                                bau_xy)
+
+        coarse_ij = find_all_ij_ext(full_ext[1,:], full_ext[2,:], coarse_geodata.origin, coarse_geodata.cell_size, coarse_geodata.ndims; inclusive=false)
+        coarse_xy = get_sij_from_ij(coarse_ij, coarse_geodata.origin, coarse_geodata.cell_size)
+
+        coarse_ci = CartesianIndex.(coarse_ij[:,1],coarse_ij[:,2])
+
+        # ys = coarse_data.data[coarse_ci,:]
+        measurements[2] = @views STARSInstrumentData(coarse_data.data[coarse_ci,:],
+                            coarse_data.bias, 
+                            coarse_data.uq, 
+                            coarse_data.dynamic_bias,
+                            coarse_data.dynamic_bias_coefs,
+                            abs.(coarse_geodata.cell_size),
+                            coarse_geodata.dates,
+                            coarse_xy)
+
+        ### x,y coords for all baus
+        bau_coords = get_sij_from_ij(bau_ij, target_origin, target_csize)
+
+        ### subset prior mean and var arrays to bau pixels
+        prior_mean_sub = @views prior_mean[bau_ci][:]
+        prior_var_sub = @views prior_var[bau_ci][:]
+
+        t_ind = CartesianIndex.(target_ij[:,1], target_ij[:,2])
+
+        model_pars_sub = model_pars[bau_ci,:]
+
+        d = Dict()
+        d[:measurements] = measurements
+        d[:target_coords] = bau_coords
+        d[:kp_ij] = t_ind
+        d[:prior_mean] = prior_mean_sub
+        d[:prior_var] = prior_var_sub
+        d[:model_pars] = model_pars_sub
+
+        push!(T,d)
+    end
+
+    result = @showprogress pmap(x -> coarse_fine_fusion_dict(x,  
+                        target_times, spatial_mod, 
+                        obs_operator, state_in_cov, 
+                        cov_wt, phi, ar_par, smooth) , T , batch_size=batchsize);
 
     for i in 1:n
         @views fused_image[result[i][1],:] = result[i][2]
@@ -2770,10 +2985,10 @@ function coarse_fine_fusion_cbias_dict(d, ## at fine resolution
     tk = 1
     for (t,t2) in enumerate(t0:tp)
         Qf .= Q
-        if state_in_cov 
+        if state_in_cov && t > 1
             
-            Xtt = @views filtering_means[1:nf,1:t]
-            Wt = @views filtering_prec[:,1:t] .* sqrt(measurements[1].uq) ### scale by ratio of sigma_e / sigma_filter
+            Xtt = @views filtering_means[1:nf,2:t]
+            Wt = @views filtering_prec[:,2:t] ./ sum(filtering_prec[:,2:t],dims=2) ### scale by ratio of sigma_e / sigma_filter
             pairwise!(Qss,Euclidean(1e-12), Xtt .* Wt, dims=1) 
             # phi = maximum([0.01,mean(Qss)])
 
