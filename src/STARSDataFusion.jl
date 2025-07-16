@@ -1992,7 +1992,6 @@ function kalman_filter!(x_new::AbstractVector{T}, P_new::AbstractMatrix{T},
         x_pred::AbstractVector{T}, 
         P_pred::AbstractMatrix{T}) where T <: Real 
 
-    # mul!(y, Ht, x_pred, -1.0, 1.0)
     res_pred = y - Ht * x_pred
     HPpT = P_pred * Ht'
 
@@ -2012,8 +2011,6 @@ function kalman_filter!(x_new::AbstractVector{T}, P_new::AbstractMatrix{T},
     HP_pred = Ht * P_pred
     P_new .= P_pred
     mul!(P_new, K, HP_pred, -1.0, 1.0);
-
-    # return x_new, P_new
 end
 
 
@@ -2169,8 +2166,7 @@ function coarse_fine_fusion_cbias!(fused_image,
             phi = maximum([0.01,mean(Qss)])
 
             Qss ./= phi
-            # Qss .= exp.(-Qss) + UniformScaling(1e-8)
-            # replace!(x->(x==1.0 ? 1.0+1e-8 : x), Qss) 
+
             Qss .= cvs * exp.(-Qss) * cvs + UniformScaling(1e-8)
 
             Qss .*= (1.0 .- cov_wt) 
@@ -2182,7 +2178,7 @@ function coarse_fine_fusion_cbias!(fused_image,
         if !any(data_kp[:,t])
             ys = fill(NaN,1)
             err_vars = fill(NaN,1)
-            # M = KSModel(nothing, Qf, F)
+
         else
             ys = Float64[]
             err_vars = Float64[]
@@ -2199,7 +2195,7 @@ function coarse_fine_fusion_cbias!(fused_image,
                 end
                 nii += nnobs[x]
             end
-            # M = KSModel(H[yms,:], Q, F)
+
             Ht = H[yms,:]
         end;
 
@@ -2465,9 +2461,8 @@ function coarse_fine_fusion_dict(d,
     predicted_means = zeros(n,nsteps)
     predicted_covs = zeros(n,n,nsteps)
 
-    # pv = Diagonal(sqrt.(prior_var))
+
     filtering_means[:,1] = prior_mean
-    # filtering_covs[:,:,1] = pv * spatial_mod(target_coords', model_pars[1,2:end]) * pv ### spatial prior
     filtering_covs[:,:,1] = Diagonal(prior_var)
     filtering_prec[:,1] = 1.0 ./ sqrt.(prior_var)
     
@@ -2494,7 +2489,7 @@ function coarse_fine_fusion_dict(d,
             Wt = @views filtering_prec[:,2:t] ./ sum(filtering_prec[:,2:t],dims=2) ### scale by precision
             pairwise!(Qss,Euclidean(1e-12), Xtt .* Wt, dims=1) 
             # phi = maximum([0.0001,median(Qss)/5])
-            # println(phi)
+
             Qss ./= phi
             # Qss .= exp.(-Qss) + UniformScaling(1e-8)
             # replace!(x->(x==1.0 ? 1.0+1e-8 : x), Qss) 
@@ -2509,7 +2504,7 @@ function coarse_fine_fusion_dict(d,
         if !any(data_kp[:,t])
             ys = fill(NaN,1)
             err_vars = fill(NaN,1)
-            # M = KSModel(nothing, Qf, F)
+
         else
             ys = Float64[]
             err_vars = Float64[]
@@ -2526,7 +2521,7 @@ function coarse_fine_fusion_dict(d,
                 end
                 nii += nnobs[x]
             end
-            # M = KSModel(H[yms,:], Q, F)
+
             Ht = H[yms,:]
         end;
 
@@ -2556,11 +2551,6 @@ function coarse_fine_fusion_dict(d,
 
         end    
 
-        # if t2 .∈ Ref(target_times)
-        #     fused_image[:,tk] = @views filtering_means[1:nbau,t+1];
-        #     fused_sd_image[:,tk] = @views 1.0 ./ filtering_prec[1:nbau,t+1]
-        #     tk += 1
-        # end
     end  
     if smooth
         st = minimum(kp_times)
