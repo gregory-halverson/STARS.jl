@@ -1,7 +1,7 @@
 name = "STARSDataFusion"
 uuid = "70ccc657-289f-4534-a407-e03a16fd1153"
 authors = ["Gregory Halverson", "Margaret Johnson", "Jouni Susiluoto"]
-version = "1.1.0"
+version = "1.2.0"
 
 [deps]
 ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
@@ -84,7 +84,7 @@ Kalman = "0.1"
 KernelFunctions = "0.10.65"
 LinearAlgebra = "1.9"
 Logging = "1.9"
-Modland = "0.1.1"
+Modland = "1.0.0"
 MultivariateStats = "0.10.3"
 NaNStatistics = "0.6"
 Nullables = "1.0"

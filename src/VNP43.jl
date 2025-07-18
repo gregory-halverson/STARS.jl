@@ -18,7 +18,7 @@ include("VIIRS.jl")
 
 using .VIIRS: download_VIIRS_tile
 
-using Modland: modland_tiles_in_polygon
+using Modland: MODLAND_tiles_in_polygon
 
 export download_VIIRS_tile
 
